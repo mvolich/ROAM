@@ -1,0 +1,8 @@
+streamlit>=1.33
+pandas>=2.2
+numpy>=1.26
+plotly>=5.20
+cvxpy>=1.4
+ecos>=2.0
+osqp>=0.6
+openpyxl>=3.1

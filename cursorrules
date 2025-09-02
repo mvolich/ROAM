@@ -1,0 +1,86 @@
+# ROAM — Cursor Rules
+
+# Purpose
+These rules give Cursor’s Codebase AI clear, persistent context to make safe edits, write tests, and propose patches for ROAM (Regime Optimised Allocation Model). Place this file at the repo root.
+
+# Entry point
+- Single-file Streamlit app: `app.py` is the entry point.
+- Target Python: 3.11+.
+
+# Data inputs (strict)
+- Excel workbook with TWO sheets merged on `Bloomberg_Ticker`:
+  - `Optimiser_Input` required columns:
+    - Bloomberg_Ticker (str)
+    - Name (str)
+    - Instrument_Type (str)
+    - Yield_Hedged_Pct (float, percent units e.g. 5.10)
+    - Roll_Down_bps_1Y (float, basis points e.g. 35)
+    - OAD_Years (float)
+    - OASD_Years (float)
+    - KRD_2y, KRD_5y, KRD_10y, KRD_20y, KRD_30y (float)
+    - Include (bool/int)
+  - `MetaData` required columns:
+    - Bloomberg_Ticker (str)
+    - Is_Non_IG, Is_EM, Is_AT1, Is_T2, Is_Hybrid, Is_Cash (bool/int)
+- Optional previous weights CSV: [Name or Bloomberg_Ticker], Weight.
+- Normalize booleans to {0,1}. Fail fast with a clear message if required columns are missing or merge drops rows.
+
+# Model semantics
+- Baseline ER: Yield_Hedged_Pct + (Roll_Down_bps_1Y / 10000) * 100  (annual %).
+- Macro overlay: add ER_macro_add derived from regime shocks:
+  - Rates: shocks at 2y/5y/10y/20y/30y mapped via KRDs.
+  - Spreads: shocks for IG/HY/AT1/EM mapped via OASD.
+- Objectives (must stay available in UI):
+  1) Max Excess Return / CVaR
+  2) Risk-adjusted Return (ER − λ·CVaR)
+  3) Min VaR for Target Return Percentile (auto-relax if infeasible)
+  4) Max Return
+- Risk at 1M horizon, α = 99% for VaR/CVaR (unless explicitly changed).
+
+# Constraints
+- Corridors (min–max weights): Non-IG, EM, AT1, Hybrid, Cash.
+- Factor budgets: |KRD10y|, |Twist(30y−2y)|, sDV01 IG/HY.
+- Risk bands: VaR99 and/or CVaR99.
+- Turnover: penalty (bps/100%) and optional hard cap vs previous weights.
+
+# Solver policy
+- Primary solvers: ECOS (convex), OSQP (QP). Provide SCS fallback.
+- All `prob.solve(...)` calls should use a helper that tries ECOS → OSQP → SCS with consistent options and returns a clear, user-facing warning if fallbacks were required.
+- Never crash the UI on solver errors; surface friendly messages and suggestions (loosen corridors, lower percentile, widen VaR band).
+
+# UI/UX
+- Streamlit should validate inputs and echo the active regime, objective, constraints, and any auto-relaxed parameters.
+- Provide “cap usage” gauges and change-vs-previous diagnostics when previous weights are supplied.
+- Keep copy concise; prefer explicit labels and units (%, bps, years).
+
+# Coding standards
+- Pure functions for data validation, macro overlay, objective construction, constraint assembly, and solving.
+- Avoid hidden globals; pass parameters explicitly via dataclasses or simple dicts.
+- Prefer NumPy/Pandas ops over Python loops for performance.
+- Log key steps; catch exceptions and raise user-friendly errors.
+
+# Testing guidance
+- Add pytest tests that:
+  - Build tiny in-memory DataFrames for both sheets.
+  - Verify validation catches missing columns and bad types.
+  - Ensure optimisation completes under wide corridors.
+  - Exercise solver fallback path (simulate ECOS failure).
+- Keep tests fast and deterministic.
+
+# Common refactor tasks for AI
+- Extract `validate_inputs(df_in, df_meta) -> CleanData`.
+- Extract `apply_macro_overlay(clean, regime) -> returns_vector`.
+- Implement `solve_with_fallback(prob, verbose=False, warm_start=True, **opts)` and replace direct `prob.solve(...)` calls.
+- Add `explain_infeasibility(e)` helper that suggests knob changes based on exception text and current settings.
+- Ensure all user-controllable parameters are surfaced in the sidebar with tooltips and sensible defaults.
+
+# Non-goals
+- Do not introduce heavy new dependencies or hidden services.
+- Do not change the input schema without updating README and validation.
+- Do not degrade numerical stability for cosmetic speedups.
+
+# Prompts this project responds well to
+- “Audit README vs app.py and return a unified diff patch.”
+- “Add validation for required columns and friendly errors; include tests.”
+- “Replace all solve calls with ECOS→OSQP→SCS fallback helper; include tests and logging.”
+- “Make the Min VaR percentile auto-relax loop explicit with a warning banner and final value.”
