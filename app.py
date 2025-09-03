@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-APP_BUILD = "macro-expret-fix-2025-09-02"
+APP_BUILD = "macro-expret-fix-2025-09-02b"  # bump to bust st.cache_data
 
 # Silence DPP warnings after making problems DPP-compliant
 try:
@@ -136,6 +136,7 @@ class ParamCVaRSolver:
     p_lim_krd10: 'cp.Parameter'; p_lim_twist: 'cp.Parameter'; p_lim_sdv_ig: 'cp.Parameter'; p_lim_sdv_hy: 'cp.Parameter'
     p_min_krd10: 'cp.Parameter'; p_max_krd10: 'cp.Parameter'; p_min_twist: 'cp.Parameter'; p_max_twist: 'cp.Parameter'
     p_min_sdv_ig: 'cp.Parameter'; p_min_sdv_hy: 'cp.Parameter'
+    p_w_min: 'cp.Parameter'; p_w_max: 'cp.Parameter'
     prob_min_cvar: 'cp.Problem'; prob_max_ret: 'cp.Problem'
     sharpe_lambda: 'cp.Parameter'; prob_max_sharpe: 'cp.Problem'
 
@@ -161,6 +162,9 @@ def get_compiled_solver(mu, pnl, tags, factor_matrix) -> ParamCVaRSolver:
     max_turn = cp.Parameter()
     turn_pen = cp.Parameter(nonneg=True)
     sharpe_lambda = cp.Parameter(nonneg=True)
+
+    p_w_min = cp.Parameter(N)
+    p_w_max = cp.Parameter(N)
 
     p_max_non_ig = cp.Parameter(); p_max_em = cp.Parameter(); p_max_hybrid = cp.Parameter(); p_max_cash = cp.Parameter(); p_max_at1 = cp.Parameter()
     p_min_non_ig = cp.Parameter(nonneg=True); p_min_em = cp.Parameter(nonneg=True); p_min_hybrid = cp.Parameter(nonneg=True); p_min_cash = cp.Parameter(nonneg=True); p_min_at1 = cp.Parameter(nonneg=True)
@@ -193,6 +197,9 @@ def get_compiled_solver(mu, pnl, tags, factor_matrix) -> ParamCVaRSolver:
         cvar_expr <= cvar_cap,
         alpha >= p_var_floor,
 
+        w >= p_w_min,
+        w <= p_w_max,
+
         is_non_ig @ w <= p_max_non_ig,
         is_em     @ w <= p_max_em,
         is_hybrid @ w <= p_max_hybrid,
@@ -214,7 +221,10 @@ def get_compiled_solver(mu, pnl, tags, factor_matrix) -> ParamCVaRSolver:
         p_mu @ w >= target_ret,
     ]
 
-    obj_min_cvar = cp.Minimize(cvar_expr + turn_pen*cp.norm1(w-prev_w) + ridge*cp.sum_squares(w))
+    # Treat turnover penalty as ANNUAL; Min-CVaR uses monthly CVaR, so scale penalty by 1/12 here.
+    obj_min_cvar = cp.Minimize(
+        cvar_expr + (turn_pen/12.0)*cp.norm1(w-prev_w) + ridge*cp.sum_squares(w)
+    )
     obj_max_ret  = cp.Maximize(p_mu @ w - turn_pen*cp.norm1(w-prev_w) - ridge*cp.sum_squares(w))
     obj_max_sharpe = cp.Maximize((p_mu @ w) - sharpe_lambda*(12.0*cvar_expr) - turn_pen*cp.norm1(w-prev_w) - ridge*cp.sum_squares(w))
 
@@ -233,13 +243,14 @@ def get_compiled_solver(mu, pnl, tags, factor_matrix) -> ParamCVaRSolver:
         p_lim_krd10=p_lim_krd10, p_lim_twist=p_lim_twist, p_lim_sdv_ig=p_lim_sdv_ig, p_lim_sdv_hy=p_lim_sdv_hy,
         p_min_krd10=p_min_krd10, p_max_krd10=p_max_krd10, p_min_twist=p_min_twist, p_max_twist=p_max_twist,
         p_min_sdv_ig=p_min_sdv_ig, p_min_sdv_hy=p_min_sdv_hy,
+        p_w_min=p_w_min, p_w_max=p_w_max,
         prob_min_cvar=prob_min_cvar, prob_max_ret=prob_max_ret,
         sharpe_lambda=sharpe_lambda, prob_max_sharpe=prob_max_sharpe
     )
 
 # ----------------------------- Configuration & constants -----------------------------
 st.set_page_config(
-    page_title="Rubrics Asset Allocation Optimiser",
+    page_title="Regime Optimised Allocation Model",
     page_icon="https://rubricsam.com/wp-content/uploads/2021/01/cropped-rubrics-logo-tight.png",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -248,7 +259,17 @@ st.markdown("""
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
   * { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif !important; }
-  .stApp { font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif !important; }
+
+  /* Sidebar full height + natural scroll */
+  [data-testid="stSidebar"] {
+      min-height: 100vh !important;
+      height: auto !important;
+      overflow-y: visible !important;
+  }
+  [data-testid="stSidebarContent"] {
+      min-height: 100vh !important;
+      height: auto !important;
+  }
 </style>
 """, unsafe_allow_html=True)
 inject_brand_css()
@@ -274,6 +295,40 @@ EPS = 1e-6
 RATES_BP99  = { "2y": 60.0, "5y": 50.0, "10y": 45.0, "20y": 45.0, "30y": 40.0 }
 SPREAD_BP99 = { "IG": 100.0, "HY": 200.0, "AT1": 350.0, "EM": 250.0 }
 
+def _nearest_psd(A, eps=1e-10):
+    """Higham-like nearest PSD projection for symmetric A."""
+    B = (A + A.T) / 2.0
+    w, V = np.linalg.eigh(B)
+    w_clipped = np.clip(w, eps, None)
+    return (V * w_clipped) @ V.T
+
+def _mv_sample(mean, cov, n, kind="normal", nu=7, rng=None):
+    """
+    Samples n draws from N(mean,cov) or multivariate t_ν with scale cov.
+    mean: (d,), cov: (d,d). For t, uses normal/chi-square mix.
+    """
+    rng = np.random.default_rng() if rng is None else rng
+    d = mean.shape[0]
+    if kind == "t":
+        # multivariate t via normal / sqrt(chi2/nu)
+        g = rng.standard_normal(size=(n, d))
+        # Cholesky with PSD guard
+        try:
+            L = np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError:
+            L = np.linalg.cholesky(_nearest_psd(cov))
+        z = g @ L.T
+        chi = rng.chisquare(df=nu, size=(n, 1))
+        scale = np.sqrt(nu / chi)  # heavy-tail scale per draw
+        return mean + z * scale
+    else:
+        try:
+            L = np.linalg.cholesky(cov)
+        except np.linalg.LinAlgError:
+            L = np.linalg.cholesky(_nearest_psd(cov))
+        g = rng.standard_normal(size=(n, d))
+        return mean + g @ L.T
+
 def spacer(h=1):
     for _ in range(h): st.write("")
 
@@ -287,8 +342,177 @@ def _save_fund_defaults(fund: str, settings: dict):
 def _get_global_default(key: str, fallback): return _user_defaults().get("globals", {}).get(key, fallback)
 def _get_fund_default(fund: str, key: str, fallback): return _user_defaults().get("funds", {}).get(fund, {}).get(key, fallback)
 
-# ----------------------------- Ingest & tagging -----------------------------
+# -----------------------------
+# Optimiser_Input validation
+# -----------------------------
+from dataclasses import dataclass
+import textwrap
+
+# Required and optional columns after rename/synonym resolution
 REQUIRED_MAIN_COLS = [
+    "Name",              # unique sleeve name
+    "Include",           # bool or 0/1
+    "Weight_Min",        # fraction [0,1]
+    "Weight_Max",        # fraction [0,1]
+    "Yield_Hedged_Pct",  # annual pct, e.g., 3.2 means 3.2%
+    "OASD_Years",        # spread DV01-equivalent exposure in years (>=0)
+    "KRD_2y",
+    "KRD_5y",
+    "KRD_10y",
+]
+
+# Optional but recommended; used in several paths
+OPTIONAL_MAIN_COLS = [
+    "KRD_20y",
+    "Roll_Down_bps_1Y",  # treated as PERCENT in this app (team decision)
+    "Category",          # IG/HY/EM/AT1/etc. if present
+]
+
+PERCENT_FRACTION_COLS = [
+    "Weight_Min", "Weight_Max"
+]
+
+NUMERIC_NONNEG_COLS = [
+    "OASD_Years", "KRD_2y", "KRD_5y", "KRD_10y"
+]
+
+KRD_ALLOWED_RANGE = (-10.0, 10.0)  # sane guardrails per year of rate move
+
+@dataclass
+class InputCheckResult:
+    df: "pd.DataFrame"
+    warnings: list
+
+def _fail(msg: str):
+    import streamlit as st
+    st.error(msg)
+    st.stop()
+
+def _validate_optimizer_input(df: "pd.DataFrame") -> InputCheckResult:
+    import numpy as np
+    import pandas as pd
+
+    if df is None or df.empty:
+        _fail("Optimiser_Input is empty after ingest/rename.")
+
+    cols = list(df.columns)
+    missing = [c for c in REQUIRED_MAIN_COLS if c not in cols]
+    
+    if "Weight_Min" not in cols:
+        df["Weight_Min"] = 0.0
+        missing = [c for c in missing if c != "Weight_Min"]
+    if "Weight_Max" not in cols:
+        df["Weight_Max"] = 1.0
+        missing = [c for c in missing if c != "Weight_Max"]
+    # Defaults are applied silently, no warnings shown
+    
+    if missing:
+        head = ", ".join(cols[:12])
+        _fail(
+            "Optimiser_Input is missing required columns: "
+            f"{missing}\n\nFound columns (first 12): {head}\n"
+            "Check the sheet name and column headers (case-insensitive synonyms must map to these names)."
+        )
+
+    # Coerce dtypes
+    df = df.copy()
+
+    # Include -> boolean
+    if not pd.api.types.is_bool_dtype(df["Include"]):
+        # Accept 1/0, 'TRUE'/'FALSE', etc.
+        df["Include"] = df["Include"].astype(str).str.strip().str.lower().map(
+            {"1": True, "true": True, "yes": True, "y": True, "0": False, "false": False, "no": False, "n": False}
+        ).fillna(False)
+
+    # Ensure Name uniqueness and non-empty
+    if df["Name"].isna().any() or (df["Name"].astype(str).str.strip() == "").any():
+        _fail("Column 'Name' contains empty values. Every row must have a non-empty unique Name.")
+    if df["Name"].duplicated().any():
+        dups = df.loc[df["Name"].duplicated(), "Name"].tolist()
+        _fail(f"Duplicate Names not allowed: {dups}")
+
+    # Bounds and numeric coercions
+    warnings = []
+
+    # Percent-as-fraction bounds for min/max
+    for c in PERCENT_FRACTION_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+        bad = df[c].isna() | (df[c] < 0) | (df[c] > 1)
+        if bad.any():
+            rows = df.index[bad].tolist()
+            _fail(f"'{c}' must be within [0,1]. Bad rows (0-based): {rows}")
+
+    if (df["Weight_Min"] > df["Weight_Max"]).any():
+        rows = df.index[(df["Weight_Min"] > df["Weight_Max"])].tolist()
+        _fail(f"'Weight_Min' cannot exceed 'Weight_Max'. Violations at rows: {rows}")
+
+    # Ensure types and feasible bounds
+    df["Weight_Min"] = pd.to_numeric(df["Weight_Min"], errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    df["Weight_Max"] = pd.to_numeric(df["Weight_Max"], errors="coerce").fillna(1.0).clip(0.0, 1.0)
+    bad = df["Weight_Min"] > df["Weight_Max"]
+    if bad.any():
+        rows = df.index[bad].tolist()
+        _fail(f"`Weight_Min` cannot exceed `Weight_Max`. Rows: {rows}")
+
+    # Respect 'Include' — excluded sleeves must have max=0 and min=0
+    include_mask = pd.api.types.is_bool_dtype(df["Include"])
+    if not include_mask:
+        # Convert Include to boolean if not already
+        df["Include"] = df["Include"].astype(str).str.strip().str.lower().map(
+            {"1": True, "true": True, "yes": True, "y": True, "0": False, "false": False, "no": False, "n": False}
+        ).fillna(False)
+    include_mask = df["Include"].astype(bool)
+    df.loc[~include_mask, ["Weight_Min","Weight_Max"]] = 0.0
+
+    # Non-negativity checks
+    for c in NUMERIC_NONNEG_COLS:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+        if df[c].isna().any():
+            rows = df.index[df[c].isna()].tolist()
+            _fail(f"'{c}' contains non-numeric values. Bad rows: {rows}")
+        if (df[c] < 0).any():
+            rows = df.index[(df[c] < 0)].tolist()
+            _fail(f"'{c}' must be non-negative. Bad rows: {rows}")
+
+    # Sanity guardrails for KRDs (helps catch unit mistakes)
+    for c in ["KRD_2y", "KRD_5y", "KRD_10y"]:
+        lo, hi = KRD_ALLOWED_RANGE
+        out = (df[c] < lo) | (df[c] > hi)
+        if out.any():
+            rows = df.index[out].tolist()
+            _fail(f"'{c}' outside plausible range {lo}..{hi}. Check units. Bad rows: {rows}")
+
+    # Optional columns: coerce if present
+    if "KRD_20y" in df.columns:
+        df["KRD_20y"] = pd.to_numeric(df["KRD_20y"], errors="coerce").fillna(0.0)
+
+    if "Roll_Down_bps_1Y" in df.columns:
+        # Team agreement: it's provided as PERCENT (e.g., +0.40 means +0.40%).
+        df["Roll_Down_bps_1Y"] = pd.to_numeric(df["Roll_Down_bps_1Y"], errors="coerce").fillna(0.0)
+        # Heuristic check: if values look like big numbers, they might be bps by mistake.
+        if df["Roll_Down_bps_1Y"].abs().gt(50.0).any():
+            warnings.append(
+                "Roll_Down_bps_1Y has magnitudes > 50. Interpreted as PERCENT by design; "
+                "if your sheet is in bps, convert before loading (e.g., 40 bps -> 0.40)."
+            )
+
+    # Yield hedged: numeric; allow negative but warn if absurd
+    df["Yield_Hedged_Pct"] = pd.to_numeric(df["Yield_Hedged_Pct"], errors="coerce")
+    if df["Yield_Hedged_Pct"].isna().any():
+        rows = df.index[df["Yield_Hedged_Pct"].isna()].tolist()
+        _fail(f"'Yield_Hedged_Pct' contains non-numeric values. Bad rows: {rows}")
+    if df["Yield_Hedged_Pct"].abs().gt(40.0).any():
+        warnings.append("Yield_Hedged_Pct has values with |value| > 40%. Check units and hedging columns.")
+
+    # OASD_Years plausibility (can be 0..~10 normally)
+    if df["OASD_Years"].gt(15.0).any():
+        warnings.append("OASD_Years > 15 detected. Check whether this column encodes years (not bps).")
+
+    return InputCheckResult(df=df, warnings=warnings)
+
+# ----------------------------- Ingest & tagging -----------------------------
+# Legacy required columns for metadata compatibility
+LEGACY_REQUIRED_MAIN_COLS = [
     "Bloomberg_Ticker","Name","Instrument_Type",
     "Yield_Hedged_Pct","Roll_Down_bps_1Y","OAD_Years","OASD_Years",
     "KRD_2y","KRD_5y","KRD_10y","KRD_30y","Include"
@@ -355,8 +579,22 @@ def load_joined_input(uploaded_file_bytes: bytes, path: str = None) -> pd.DataFr
     bio = io.BytesIO(uploaded_file_bytes); xls = pd.ExcelFile(bio, engine="openpyxl")
     df_main = pd.read_excel(xls, sheet_name="Optimiser_Input")
     df_meta = pd.read_excel(xls, sheet_name="MetaData")
-    df_main = _rename_with_synonyms(df_main, REQUIRED_MAIN_COLS, MAIN_SYNONYMS)
+    df_main = _rename_with_synonyms(df_main, LEGACY_REQUIRED_MAIN_COLS, MAIN_SYNONYMS)
     df_meta = _rename_with_synonyms(df_meta, REQUIRED_META_COLS, META_SYNONYMS)
+    
+    # Validate Optimiser_Input strictly (no UI warnings)
+    try:
+        _check = _validate_optimizer_input(df_main)
+        df_main = _check.df
+        # intentionally do not display _check.warnings
+    except Exception as _e:
+        # _validate_optimizer_input already calls st.error+st.stop on known issues,
+        # but we also catch unexpected exceptions here.
+        import traceback
+        st.error("Unexpected error while validating Optimiser_Input.")
+        st.code("".join(traceback.format_exception_only(type(_e), _e)))
+        st.stop()
+    
     for c in ["Yield_Hedged_Pct","Roll_Down_bps_1Y","OAD_Years","OASD_Years","KRD_2y","KRD_5y","KRD_10y","KRD_20y","KRD_30y"]:
         if c in df_main.columns: df_main[c] = pd.to_numeric(df_main[c], errors="coerce").fillna(0.0)
     df = merge_meta_robust(df_main, df_meta)
@@ -396,17 +634,72 @@ def build_tags_from_meta(df: pd.DataFrame) -> dict:
 def bp99_to_sigma(bp99: float) -> float: return (bp99 / 10000.0) / 2.33
 
 @st.cache_data(show_spinner=False)
-def simulate_mc_draws(n_draws: int, seed: int, rates_bp99: dict, spreads_bp99: dict) -> dict:
+def simulate_mc_draws(n_draws: int, seed: int, rates_bp99: dict, spreads_bp99: dict, 
+                     use_corr: bool = False, use_tails: bool = False, nu_df: int = 7,
+                     rho_curve: float = 0.85, rho_credit: float = 0.60, rho_rates_credit: float = -0.30) -> dict:
     rng = np.random.default_rng(seed)
     sig_r = {k: bp99_to_sigma(v) for k,v in rates_bp99.items()}
     sig_s = {k: bp99_to_sigma(v) for k,v in spreads_bp99.items()}
-    d2, d5, d10 = [rng.normal(0, sig_r[k], size=n_draws) for k in ["2y","5y","10y"]]
-    d20 = rng.normal(0, sig_r.get("20y", sig_r["10y"]), size=n_draws)
-    d30 = rng.normal(0, sig_r["30y"], size=n_draws)
-    dig  = rng.normal(0, sig_s["IG"],  size=n_draws)
-    dhy  = rng.normal(0, sig_s["HY"],  size=n_draws)
-    dat1 = rng.normal(0, sig_s["AT1"], size=n_draws)
-    dem  = rng.normal(0, sig_s["EM"],  size=n_draws)
+    
+    # Build arrays for rates and spreads
+    tenor_labels = ["2y","5y","10y","20y","30y"]
+    rate_sigmas = np.array([sig_r[k] for k in tenor_labels])
+    # Handle 20y fallback
+    rate_sigmas[3] = sig_r.get("20y", sig_r["10y"])
+    
+    spread_sigmas = np.array([sig_s["IG"], sig_s["HY"], sig_s["AT1"], sig_s["EM"]])
+    
+    n_r = len(tenor_labels)
+    n_s = len(spread_sigmas)
+    d = n_r + n_s
+
+    # Means are zero for shocks (macro overlay added elsewhere)
+    mean = np.zeros(d)
+
+    if not use_corr:
+        # Old behavior: independent normals (or t if requested), diagonal cov
+        sig = np.concatenate([rate_sigmas, spread_sigmas])
+        cov = np.diag(sig**2)
+    else:
+        # ---- Build correlated covariance ----
+        # 1) Curve block Σ_rr via AR(1)-like decay by tenor distance
+        # Define tenor indices as [0,1,2,3,4]; corr_ij = ρ_curve ** |i-j|
+        idx = np.arange(n_r)
+        C_rr = rho_curve ** np.abs(idx[:,None] - idx[None,:])
+        Σ_rr = (rate_sigmas[:,None] * rate_sigmas[None,:]) * C_rr
+
+        # 2) Credit block Σ_ss with single-factor clustering
+        # Off-diagonals = ρ_credit, diagonals = 1
+        C_ss = np.full((n_s, n_s), rho_credit)
+        np.fill_diagonal(C_ss, 1.0)
+        Σ_ss = (spread_sigmas[:,None] * spread_sigmas[None,:]) * C_ss
+
+        # 3) Cross block Σ_rs linking rates (use 10y as pivot) to all credit sleeves
+        # We map a single ρ_rc to all pairs for simplicity; weight more to 10y.
+        w_curve = np.array([0.2, 0.6, 1.0, 0.6, 0.2])  # emphasize belly/10y
+        rs = np.outer(rate_sigmas * w_curve, spread_sigmas) * rho_rates_credit
+        Σ_rs = rs
+        Σ_sr = Σ_rs.T
+
+        # 4) Assemble full Σ
+        top = np.concatenate([Σ_rr, Σ_rs], axis=1)
+        bot = np.concatenate([Σ_sr, Σ_ss], axis=1)
+        cov = np.concatenate([top, bot], axis=0)
+
+        # Guard for PSD
+        cov = _nearest_psd(cov)
+
+    # ---- Sample shocks ----
+    kind = "t" if use_tails else "normal"
+    draws = _mv_sample(mean, cov, n_draws, kind=kind, nu=nu_df if use_tails else 7, rng=rng)
+    # Split back into rate & spread shocks
+    rate_draws = draws[:, :n_r]
+    spread_draws = draws[:, n_r:]
+    
+    # Return in the same format as before
+    d2, d5, d10, d20, d30 = rate_draws.T
+    dig, dhy, dat1, dem = spread_draws.T
+    
     return {"d2": d2, "d5": d5, "d10": d10, "d20": d20, "d30": d30, "dig": dig, "dhy": dhy, "dat1": dat1, "dem": dem}
 
 @st.cache_data(show_spinner=False)
@@ -457,18 +750,17 @@ def target_return_from_percentile(mu_vec_dec: np.ndarray, pctile: int) -> float:
 
 # ---------- Macro drift (expected return) helper ----------
 def compute_macro_add_percent(df: pd.DataFrame, tags: dict, preset_name: str,
-                              rates_bp99: dict, spreads_bp99: dict) -> np.ndarray:
+                              rates_bp99: dict, spreads_bp99: dict,
+                              rate_sign: int, spread_sign: int, k: float) -> np.ndarray:
     """
     Per-asset expected macro add in ANNUAL PERCENT:
       -(KRD · E[Δy]) - (OASD · E[Δspread]).
     We use a small fraction k of 1M 99%-tail magnitudes with scenario sign.
     In current environment, rates are assumed to FALL in all three presets; spreads tighten in benign, widen in stress.
     """
-    scale_map = {"Benign": 0.03, "Moderate": 0.08, "Severe (2008-style)": 0.15}
-    k = float(scale_map.get(preset_name, 0.08))
-
-    rate_sign   = -1.0  # rates fall in all presets (consistent with your guidance)
-    spread_sign = +1.0 if preset_name in ("Moderate","Severe (2008-style)") else -1.0
+    rate_sign = float(np.sign(rate_sign) or -1.0)
+    spread_sign = float(np.sign(spread_sign) or -1.0)
+    k = float(max(0.01, min(0.50, k)))
 
     dy_dec = np.array([
         rate_sign*k*rates_bp99.get("2y",0)/10000,
@@ -491,7 +783,11 @@ def compute_macro_add_percent(df: pd.DataFrame, tags: dict, preset_name: str,
     dEM  = spread_sign*k*spreads_bp99.get("EM",0)/10000
 
     # Government bonds should have zero spread sensitivity
-    is_government = df["Name"].str.contains("Treasury|Government|Govt", case=False, na=False).values
+    if "Is_Govie" in df.columns:
+        is_government = df["Is_Govie"].astype(bool).values
+    else:
+        # Broader regex: add Bund, Gilt, JGB, OAT, BTP, UST, Sovereign, etc.
+        is_government = df["Name"].str.contains("Treasury|Government|Govt|Bund|Gilt|JGB|OAT|BTP|Sov|Sovereign|UST", case=False, na=False).values
 
     dspread_m = np.where(is_at1,dAT1, np.where(is_em,dEM, np.where(is_hy,dHY,dIG)))
     dspread_m = np.where(is_government, 0.0, dspread_m)
@@ -550,12 +846,26 @@ def solve_max_excess_over_cvar(df, tags, mu, pnl_matrix, fund, params, prev_w=No
     S.p_min_twist.value=float(params.get("min_twist",0.0));  S.p_max_twist.value=float(params.get("max_twist",fb.get("limit_twist",0.5)))
     S.p_min_sdv_ig.value=float(params.get("min_sdv01_ig",0.0)); S.p_min_sdv_hy.value=float(params.get("min_sdv01_hy",0.0))
     # risk & turnover
-    S.cvar_cap.value=float(params.get("cvar_cap",VAR99_CAP[fund]*1.15)); S.p_cvar_alpha.value=float(params.get("cvar_alpha",0.99))
+    S.cvar_cap.value=float(params.get("cvar_cap",VAR99_CAP[fund])); S.p_cvar_alpha.value=float(params.get("cvar_alpha",0.99))
     S.p_var_floor.value=float(params.get("min_var",0.0))
     n=len(df); apply_turn= prev_w is not None and _np.sum(prev_w)>1e-8
     S.prev_w.value=(prev_w if apply_turn else _np.zeros(n)); S.max_turn.value=float(params.get("max_turnover",TURNOVER_DEFAULTS["max_turnover"]) if apply_turn else 1.0)
     S.turn_pen.value=float(params.get("turnover_penalty",TURNOVER_DEFAULTS["penalty_bps_per_100"])/10000.0 if apply_turn else 0.0)
     S.p_mu.value=_np.asarray(mu,float)
+    
+    # Wire per-sleeve bounds to solver
+    w_min_vec = df.reindex(columns=["Weight_Min"], fill_value=0.0).values.reshape(-1)
+    w_max_vec = df.reindex(columns=["Weight_Max"], fill_value=1.0).values.reshape(-1)
+
+    # Safety: ensure numerical feasibility (tiny slack prevents accidental infeasibility from float issues)
+    eps = 1e-9
+    w_min_vec = _np.clip(w_min_vec, 0.0, 1.0 - eps)
+    w_max_vec = _np.clip(w_max_vec, eps, 1.0)
+    w_max_vec = _np.maximum(w_max_vec, w_min_vec + eps)
+
+    S.p_w_min.value = w_min_vec.astype(float)
+    S.p_w_max.value = w_max_vec.astype(float)
+    
     # rf proxy
     rf=0.0
     if "is_tbill" in tags and tags["is_tbill"].any():
@@ -602,7 +912,7 @@ def solve_portfolio(df, tags, mu, pnl_matrix, fund, params, prev_w=None):
     S.p_min_twist.value=float(params.get("min_twist",0.0)); S.p_max_twist.value=float(params.get("max_twist",fb.get("limit_twist",0.5)))
     S.p_min_sdv_ig.value=float(params.get("min_sdv01_ig",0.0)); S.p_min_sdv_hy.value=float(params.get("min_sdv01_hy",0.0))
     # risk & turnover
-    S.cvar_cap.value=float(params.get("cvar_cap",VAR99_CAP[fund]*1.15)); S.p_cvar_alpha.value=float(params.get("cvar_alpha",0.99))
+    S.cvar_cap.value=float(params.get("cvar_cap",VAR99_CAP[fund])); S.p_cvar_alpha.value=float(params.get("cvar_alpha",0.99))
     S.p_var_floor.value=float(params.get("min_var",0.0))
     n=len(df); apply_turn= prev_w is not None and _np.sum(prev_w)>1e-8
     S.prev_w.value=(prev_w if apply_turn else _np.zeros(n))
@@ -610,6 +920,19 @@ def solve_portfolio(df, tags, mu, pnl_matrix, fund, params, prev_w=None):
     S.turn_pen.value=float(params.get("turnover_penalty",TURNOVER_DEFAULTS["penalty_bps_per_100"])/10000.0 if apply_turn else 0.0)
     # expected returns
     S.p_mu.value=_np.asarray(mu,float)
+
+    # Wire per-sleeve bounds to solver
+    w_min_vec = df.reindex(columns=["Weight_Min"], fill_value=0.0).values.reshape(-1)
+    w_max_vec = df.reindex(columns=["Weight_Max"], fill_value=1.0).values.reshape(-1)
+
+    # Safety: ensure numerical feasibility (tiny slack prevents accidental infeasibility from float issues)
+    eps = 1e-9
+    w_min_vec = _np.clip(w_min_vec, 0.0, 1.0 - eps)
+    w_max_vec = _np.clip(w_max_vec, eps, 1.0)
+    w_max_vec = _np.maximum(w_max_vec, w_min_vec + eps)
+
+    S.p_w_min.value = w_min_vec.astype(float)
+    S.p_w_max.value = w_max_vec.astype(float)
 
     objective_name=params.get("objective","Max Return")
     auto_relaxed_flag=False; relaxed_pct=None
@@ -776,21 +1099,12 @@ st.markdown("""
   @media (max-width:1200px){ .rb-title h1{ font-size:2.6rem; } .rb-logo img{ height:42px; } }
 </style>
 <div class="rb-header">
-  <div class="rb-title"><h1>Rubrics Asset Allocation Optimiser</h1></div>
+  <div class="rb-title"><h1>Regime Optimised Allocation Model</h1></div>
   <div class="rb-logo"><img src="https://rubricsam.com/wp-content/uploads/2021/01/cropped-rubrics-logo-tight.png" alt="Rubrics Logo"/></div>
 </div>
 """, unsafe_allow_html=True)
 spacer(1)
 
-# Perf panel
-def render_perf_panel():
-    perf = st.session_state.get("_perf_events", [])
-    with st.expander("⚡ Performance diagnostics", expanded=True):
-        if not perf: st.info("No timed steps captured yet."); return
-        dfp = pd.DataFrame(perf); total = float(dfp["ms"].sum())
-        st.metric("Server time this run", f"{total:.1f} ms")
-        st.dataframe(dfp.sort_values("ms", ascending=False).assign(**{"ms": lambda d: d["ms"].round(1)}).rename(columns={"ms":"ms (server)"}), use_container_width=True, height=260)
-render_perf_panel()
 
 # Sidebar
 with st.sidebar:
@@ -816,18 +1130,13 @@ with st.sidebar:
     # ---- Macro scenario preset (auto-populates rate/spread magnitudes @99%) ----
     st.subheader("Macro scenario preset")
     _preset_map = {
-        "Benign": {
-            "rates":   {"2y": 100.0,  "5y": 80.0,   "10y": 60.0,   "30y": 50.0},
-            "spreads": {"IG": 150.0,  "HY": 400.0,  "AT1": 500.0,  "EM": 300.0}
-        },
-        "Moderate": {
-            "rates":   {"2y": 200.0,  "5y": 160.0,  "10y": 120.0,  "30y": 100.0},
-            "spreads": {"IG": 300.0,  "HY": 800.0,  "AT1": 1000.0, "EM": 600.0}
-        },
-        "Severe (2008-style)": {
-            "rates":   {"2y": 400.0,  "5y": 350.0,  "10y": 300.0,  "30y": 250.0},
-            "spreads": {"IG": 800.0,  "HY": 1500.0, "AT1": 2000.0, "EM": 1200.0}
-        }
+        # k is the fraction of 1M 99% shock used for the deterministic drift
+        "Benign":   {"rates": {"2y": 20.0, "5y": 15.0, "10y": 10.0, "30y": 10.0}, "spreads": {"IG": 40.0, "HY": 100.0, "AT1": 150.0, "EM": 80.0},
+                     "defaults": {"rate_sign": -1, "spr_sign": -1, "k": 0.03}},
+        "Moderate": {"rates": {"2y": 50.0, "5y": 40.0, "10y": 30.0, "30y": 20.0}, "spreads": {"IG": 100.0, "HY": 300.0, "AT1": 300.0, "EM": 200.0},
+                     "defaults": {"rate_sign": -1, "spr_sign": +1, "k": 0.08}},
+        "Crisis":   {"rates": {"2y": 150.0, "5y": 120.0, "10y": 100.0, "30y": 80.0}, "spreads": {"IG": 300.0, "HY": 700.0, "AT1": 800.0, "EM": 400.0},
+                     "defaults": {"rate_sign": -1, "spr_sign": +1, "k": 0.15}},
     }
     selected_preset = st.selectbox(
         "Select market regime for 1M 99% shocks",
@@ -848,6 +1157,11 @@ with st.sidebar:
         st.session_state["spr_AT1"]  = float(_p["spreads"]["AT1"])
         st.session_state["spr_EM"]   = float(_p["spreads"]["EM"])
         st.session_state["_prev_regime"] = selected_preset
+        # Initialize macro sign & magnitude controls from preset defaults on change
+        _d = _preset_map[selected_preset]["defaults"]
+        st.session_state["macro_rate_sign"] = int(_d["rate_sign"])
+        st.session_state["macro_spr_sign"]  = int(_d["spr_sign"])
+        st.session_state["macro_k"]         = float(_d["k"])
         # also initialise the visible text boxes with signed strings
         st.session_state["rate_2y_input"]  = f"-{abs(st.session_state['rate_2y']):.1f}"
         st.session_state["rate_5y_input"]  = f"-{abs(st.session_state['rate_5y']):.1f}"
@@ -908,9 +1222,31 @@ with st.sidebar:
     SPREAD_BP99["AT1"]=float(spr_AT1_clean); SPREAD_BP99["EM"]=float(spr_EM_clean)
 
     st.divider()
+    st.subheader("Scenario realism")
+    use_corr = st.checkbox("Use correlated scenarios", value=False, key="use_corr",
+        help="If off: independent Gaussian shocks (current behavior). If on: curve/credit/rates-credit correlations are applied.")
+    use_tails = st.checkbox("Use fat tails (Student-t)", value=False, key="use_tails",
+        help="Heavier tails for spread/rate shocks; CVaR will generally rise.")
+    nu_df = st.slider("Tail degrees of freedom (ν)", 3, 30, value=7, step=1, key="nu_df",
+        help="Lower ν ⇒ heavier tails. Ignored if 'Use fat tails' is off.")
+    # Correlation shape parameters (only enabled if use_corr)
+    rho_curve = st.slider("Curve correlation (ρ_curve)", 0.0, 0.99, value=0.85, step=0.01, key="rho_curve",
+        help="Base correlation for adjacent tenors; effective corr decays with tenor gap.")
+    rho_credit = st.slider("Credit block correlation (ρ_credit)", 0.0, 0.99, value=0.60, step=0.01, key="rho_credit",
+        help="Common clustering across credit sleeves (IG/HY/EM/AT1).")
+    rho_rates_credit = st.slider("Rates↔Credit correlation (ρ_rc)", -0.9, 0.9, value=-0.30, step=0.01, key="rho_rc",
+        help="Negative typical: rates down ⇔ credit tightens.")
+
     st.subheader("Turnover")
-    penalty_bps = st.number_input("Penalty (bps per 100% turnover)", value=_get_global_default("penalty_bps", 15.0), step=1.0, key="penalty_bps_ctrl")
+    penalty_bps = st.number_input(
+        "Annual turnover penalty (bps per 100% turnover)",
+        value=_get_global_default("penalty_bps", 15.0),
+        step=1.0,
+        key="penalty_bps_ctrl",
+        help="Interpreted as ANNUAL. In 'Min CVaR' (monthly CVaR) the penalty is divided by 12 to match units."
+    )
     max_turn = st.slider("Max turnover per rebalance", 0.0, 1.0, _get_global_default("max_turn", 0.25), 0.01, key="max_turn_ctrl")
+    st.caption("Penalty is annual. Min-CVaR uses monthly CVaR, so the penalty is internally divided by 12.")
 
     st.subheader("Sharpe settings")
     sharpe_lambda = st.number_input("CVaR penalty λ (annualised)", min_value=0.0, value=_get_global_default("sharpe_lambda", 1.0), step=0.1, key="sharpe_lambda_ctrl")
@@ -938,122 +1274,142 @@ rf_rate_dec = extract_risk_free_rate(df)
 
 # Monte-Carlo for risk + macro add for returns
 with perf_step("simulate_mc_draws", draws=int(n_draws), seed=int(seed)):
-    mc = simulate_mc_draws(int(n_draws), int(seed), dict(RATES_BP99), dict(SPREAD_BP99))
+    mc = simulate_mc_draws(int(n_draws), int(seed), dict(RATES_BP99), dict(SPREAD_BP99),
+                          use_corr=use_corr, use_tails=use_tails, nu_df=nu_df,
+                          rho_curve=rho_curve, rho_credit=rho_credit, rho_rates_credit=rho_rates_credit)
 with perf_step("build_asset_pnl_matrix", S=len(mc["d2"]), N=len(df)):
     pnl_matrix_assets = build_asset_pnl_matrix(df, tags, mc)
 with perf_step("macro_add_percent"):
     regime_name = st.session_state.get("risk_regime", "Moderate")
-    macro_add_pct_vec = compute_macro_add_percent(df, tags, regime_name, RATES_BP99, SPREAD_BP99)
+    macro_add_pct_vec = compute_macro_add_percent(
+        df, tags, regime_name, RATES_BP99, SPREAD_BP99,
+        rate_sign=st.session_state.get("macro_rate_sign", -1),
+        spread_sign=st.session_state.get("macro_spr_sign", -1),
+        k=st.session_state.get("macro_k", 0.08)
+    )
 with perf_step("expected_return_vector", assets=len(df)):
     mu_base_percent = df["ExpRet_pct"].values.astype(float)  # carry + roll (annual %)
     mu_base = mu_base_percent / 100.0
 
 # ----------------------------- Compare Funds -----------------------------
-st.subheader("Compare Funds: positioning & risk (from defaults)")
-st.caption("Each fund uses its stored per‑fund defaults (set in Fund Detail). If none saved, base defaults are used.")
+_cf_expander = st.expander("Compare Funds: positioning & risk (from defaults)", expanded=False)
+with _cf_expander:
+    st.caption("Each fund uses its stored per‑fund defaults (set in Fund Detail). If none saved, base defaults are used.")
 
 fund_outputs = {}
 ud = _user_defaults(); fund_ud = ud.get("funds", {})
 for _f, _d in fund_ud.items():
     if _d.get("objective") == "Max Drawdown Proxy": _d["objective"] = "Min VaR for Target Return Percentile"
 
-def run_fund(fund: str, objective: str, var_cap_override=None, prev_w=None, mu_override=None, fb_override=None, fc_override=None, target_return_override=None, min_var_override=None):
-    fb_local = fb_override or FACTOR_BUDGETS_DEFAULT
-    fc_local = fc_override or FUND_CONSTRAINTS[fund]
-    mu_local = mu_override if mu_override is not None else mu_base
-    cvar_cap_eff = ((var_cap_override if var_cap_override is not None else VAR99_CAP[fund]) * 1.15)
-    params = {"factor_budgets": fb_local, "fund_caps": fc_local,
-              "turnover_penalty": penalty_bps, "max_turnover": max_turn,
-              "objective": objective, "cvar_cap": cvar_cap_eff, "sharpe_lambda": sharpe_lambda, "cvar_alpha": 0.99}
-    if target_return_override is not None: params["target_return"] = float(target_return_override)
-    if min_var_override is not None:       params["min_var"] = float(min_var_override)
-    with perf_step(f"{fund} solve (single)", objective=objective):
-        w, metrics = solve_portfolio(df, tags, mu_local, pnl_matrix_assets, fund, params, prev_w)
-    if w is None: return None, metrics, None
-    return w, metrics, (pnl_matrix_assets @ w)
+    def run_fund(fund: str, objective: str, var_cap_override=None, prev_w=None, mu_override=None, fb_override=None, fc_override=None, target_return_override=None, min_var_override=None):
+        fb_local = fb_override or FACTOR_BUDGETS_DEFAULT
+        fc_local = fc_override or FUND_CONSTRAINTS[fund]
+        mu_local = mu_override if mu_override is not None else mu_base
+        cvar_cap_eff = (var_cap_override if var_cap_override is not None else VAR99_CAP[fund])
+        params = {"factor_budgets": fb_local, "fund_caps": fc_local,
+                  "turnover_penalty": penalty_bps, "max_turnover": max_turn,
+                  "objective": objective, "cvar_cap": cvar_cap_eff, "sharpe_lambda": sharpe_lambda, "cvar_alpha": 0.99}
+        if target_return_override is not None: params["target_return"] = float(target_return_override)
+        if min_var_override is not None:       params["min_var"] = float(min_var_override)
+        with perf_step(f"{fund} solve (single)", objective=objective):
+            w, metrics = solve_portfolio(df, tags, mu_local, pnl_matrix_assets, fund, params, prev_w)
+        if w is None: return None, metrics, None
+        return w, metrics, (pnl_matrix_assets @ w)
 
-# Produce overview using saved defaults (and including macro add)
-for f in ["GFI","GCF","EYF"]:
-    fdef = fund_ud.get(f, {}).copy()
-    if fdef:
-        # Use saved fund defaults with macro overlay
-        if "roll_incl_pct" in fdef:
-            rs = float(fdef["roll_incl_pct"]) / 100.0
-            mu_percent_overview = (
-                df["Yield_Hedged_Pct"].values
-                + df["Roll_Down_bps_1Y"].values * rs
-                + macro_add_pct_vec                # << macro overlay
-            )
-            mu_ov = mu_percent_overview / 100.0
-        else:
-            mu_ov = (df["ExpRet_pct"].values + macro_add_pct_vec) / 100.0
-        var_band = fdef.get("var_band", (0.0, VAR99_CAP[f]*100.0))
-        var_cap_ov = var_band[1] / 100.0; min_var_ov = var_band[0] / 100.0
-        obj_ov = fdef.get("objective", "Max Excess Return / CVaR")
-        if obj_ov == "Max Drawdown Proxy": obj_ov = "Min VaR for Target Return Percentile"
-        fc_ovr = {"max_non_ig": fdef.get("cap_nonig_rng", (0.0, FUND_CONSTRAINTS[f].get("max_non_ig",1.0)))[1],
-                  "max_em": fdef.get("cap_em_rng", (0.0, FUND_CONSTRAINTS[f].get("max_em",1.0)))[1],
-                  "max_hybrid": fdef.get("cap_hyb_rng", (0.0, FUND_CONSTRAINTS[f].get("max_hybrid",0.0)))[1],
-                  "max_cash": fdef.get("cap_cash_rng", (0.0, FUND_CONSTRAINTS[f].get("max_cash",1.0)))[1],
-                  "max_at1": fdef.get("cap_at1_rng", (0.0, FUND_CONSTRAINTS[f].get("max_at1",1.0)))[1]}
-        fb_ovr = {"limit_krd10y": fdef.get("krd10_max", FACTOR_BUDGETS_DEFAULT["limit_krd10y"]),
-                  "limit_twist": fdef.get("twist_cap_val", FACTOR_BUDGETS_DEFAULT["limit_twist"]),
-                  "limit_sdv01_ig": fdef.get("sdv_ig_rng", (0.0, FACTOR_BUDGETS_DEFAULT["limit_sdv01_ig"]))[1],
-                  "limit_sdv01_hy": fdef.get("sdv_hy_rng", (0.0, FACTOR_BUDGETS_DEFAULT["limit_sdv01_hy"]))[1]}
-        target_ret_override = target_return_from_percentile(mu_ov, int(fdef.get("target_ret_pctile", 60))) if obj_ov == "Min VaR for Target Return Percentile" else None
-        w, metrics, _ = run_fund(f, obj_ov, var_cap_override=var_cap_ov, prev_w=None, mu_override=mu_ov, fb_override=fb_ovr, fc_override=fc_ovr, target_return_override=target_ret_override, min_var_override=min_var_ov)
-        if w is not None:
-            metrics["weights"] = w
-            fund_outputs[f] = (metrics, pnl_matrix_assets, None)
-    else:
-        # No saved defaults - use base defaults with macro overlay
-        mu_ov = (df["ExpRet_pct"].values + macro_add_pct_vec) / 100.0
-        obj_ov = "Max Excess Return / CVaR"  # default objective
-        var_cap_ov = VAR99_CAP[f]; min_var_ov = 0.0
-        fc_ovr = FUND_CONSTRAINTS[f]
-        fb_ovr = FACTOR_BUDGETS_DEFAULT
-        target_ret_override = target_return_from_percentile(mu_ov, 60) if obj_ov == "Min VaR for Target Return Percentile" else None
-        w, metrics, _ = run_fund(f, obj_ov, var_cap_override=var_cap_ov, prev_w=None, mu_override=mu_ov, fb_override=fb_ovr, fc_override=fc_ovr, target_return_override=target_ret_override, min_var_override=min_var_ov)
-        if w is not None:
-            metrics["weights"] = w
-            fund_outputs[f] = (metrics, pnl_matrix_assets, None)
-
-if fund_outputs:
-    cols = st.columns(3)
-    for idx, f in enumerate(["GFI","GCF","EYF"]):
-        if f not in fund_outputs: continue
-        metrics, _, _ = fund_outputs[f]
-        with cols[idx]:
-            title_with_help(f"{f} – Expected Return", "Annualised carry + 1‑year roll‑down + macro drift (%).")
-            st.plotly_chart(kpi_number(metrics.get("ExpRet_pct", 0.0), kind="pp"),
-                            use_container_width=True, config=plotly_default_config, key=f"cmp_{f}_er")
-            title_with_help(f"{f} – VaR99 1M", "Monthly 99% Value at Risk (loss).")
-            st.plotly_chart(kpi_number(metrics.get("VaR99_1M", 0.0), kind="pct"),
-                            use_container_width=True, config=plotly_default_config, key=f"cmp_{f}_var")
-            fdef = fund_ud.get(f, {}).copy(); var_band = fdef.get("var_band", (0.0, VAR99_CAP[f]*100.0))
-            var_cap_eff = var_band[1] / 100.0; min_var_eff = var_band[0] / 100.0
-            status = "within cap" if metrics.get("VaR99_1M", 0.0) <= var_cap_eff else "over cap"
-            st.caption(f"VaR cap {var_cap_eff*100:.2f}% — {status}")
-            if min_var_eff > 0: st.caption(f"Risk band: VaR ≥ {min_var_eff*100:.2f}%")
-
-    # Chart only (table removed as requested)
-    title_with_help("Segment allocation (weights)", "Weights per segment for each fund (from saved defaults).")
-    alloc_df = pd.DataFrame(index=df["Name"])
+    # Produce overview using saved defaults (and including macro add)
     for f in ["GFI","GCF","EYF"]:
-        if f in fund_outputs:
-            w = fund_outputs[f][0].get("weights", [])
-            if len(w) == len(df): alloc_df[f] = w
-    if not alloc_df.empty:
-        alloc_df = alloc_df.fillna(0.0)
-        max_w = alloc_df.max(axis=1); mask = max_w >= float(min_weight_display)
-        alloc_df_plot = alloc_df.loc[mask].copy()
-        fig_alloc = go.Figure()
-        for col in alloc_df_plot.columns:
-            fig_alloc.add_bar(name=col, x=alloc_df_plot.index, y=alloc_df_plot[col].values, marker_color=FUND_COLOR.get(col))
-        fig_alloc.update_layout(barmode="group", height=380, margin=dict(l=10, r=10, t=40, b=80), xaxis_title="Segment", yaxis_title="Weight")
-        st.plotly_chart(fig_alloc, use_container_width=True, key="compare_funds_allocation")
-else:
-    st.info("No funds optimized yet. Set fund defaults in **Fund Detail** to populate this section.")
+        fdef = fund_ud.get(f, {}).copy()
+        if fdef:
+            # Use saved fund defaults with macro overlay
+            if "roll_incl_pct" in fdef:
+                rs = float(fdef["roll_incl_pct"]) / 100.0
+                roll_values = df["Roll_Down_bps_1Y"].values if "Roll_Down_bps_1Y" in df.columns else np.zeros(len(df))
+                mu_percent_overview = (
+                    df["Yield_Hedged_Pct"].values
+                    + roll_values * rs
+                    + macro_add_pct_vec                # << macro overlay
+                )
+                mu_ov = mu_percent_overview / 100.0
+            else:
+                mu_ov = (df["ExpRet_pct"].values + macro_add_pct_vec) / 100.0
+            var_band = fdef.get("var_band", (0.0, VAR99_CAP[f]*100.0))
+            var_cap_ov = var_band[1] / 100.0; min_var_ov = var_band[0] / 100.0
+            obj_ov = fdef.get("objective", "Max Excess Return / CVaR")
+            if obj_ov == "Max Drawdown Proxy": obj_ov = "Min VaR for Target Return Percentile"
+            fc_ovr = {"max_non_ig": fdef.get("cap_nonig_rng", (0.0, FUND_CONSTRAINTS[f].get("max_non_ig",1.0)))[1],
+                      "max_em": fdef.get("cap_em_rng", (0.0, FUND_CONSTRAINTS[f].get("max_em",1.0)))[1],
+                      "max_hybrid": fdef.get("cap_hyb_rng", (0.0, FUND_CONSTRAINTS[f].get("max_hybrid",0.0)))[1],
+                      "max_cash": fdef.get("cap_cash_rng", (0.0, FUND_CONSTRAINTS[f].get("max_cash",1.0)))[1],
+                      "max_at1": fdef.get("cap_at1_rng", (0.0, FUND_CONSTRAINTS[f].get("max_at1",1.0)))[1]}
+            fb_ovr = {"limit_krd10y": fdef.get("krd10_max", FACTOR_BUDGETS_DEFAULT["limit_krd10y"]),
+                      "limit_twist": fdef.get("twist_cap_val", FACTOR_BUDGETS_DEFAULT["limit_twist"]),
+                      "limit_sdv01_ig": fdef.get("sdv_ig_rng", (0.0, FACTOR_BUDGETS_DEFAULT["limit_sdv01_ig"]))[1],
+                      "limit_sdv01_hy": fdef.get("sdv_hy_rng", (0.0, FACTOR_BUDGETS_DEFAULT["limit_sdv01_hy"]))[1]}
+            target_ret_override = target_return_from_percentile(mu_ov, int(fdef.get("target_ret_pctile", 60))) if obj_ov == "Min VaR for Target Return Percentile" else None
+            w, metrics, _ = run_fund(f, obj_ov, var_cap_override=var_cap_ov, prev_w=None, mu_override=mu_ov, fb_override=fb_ovr, fc_override=fc_ovr, target_return_override=target_ret_override, min_var_override=min_var_ov)
+            if w is not None:
+                metrics["weights"] = w
+                fund_outputs[f] = (metrics, pnl_matrix_assets, None)
+        else:
+            # No saved defaults - use base defaults with macro overlay
+            mu_ov = (df["ExpRet_pct"].values + macro_add_pct_vec) / 100.0
+            obj_ov = "Max Excess Return / CVaR"  # default objective
+            var_cap_ov = VAR99_CAP[f]; min_var_ov = 0.0
+            fc_ovr = FUND_CONSTRAINTS[f]
+            fb_ovr = FACTOR_BUDGETS_DEFAULT
+            target_ret_override = target_return_from_percentile(mu_ov, 60) if obj_ov == "Min VaR for Target Return Percentile" else None
+            w, metrics, _ = run_fund(f, obj_ov, var_cap_override=var_cap_ov, prev_w=None, mu_override=mu_ov, fb_override=fb_ovr, fc_override=fc_ovr, target_return_override=target_ret_override, min_var_override=min_var_ov)
+            if w is not None:
+                metrics["weights"] = w
+                fund_outputs[f] = (metrics, pnl_matrix_assets, None)
+
+    if fund_outputs:
+        cols = st.columns(3)
+        for idx, f in enumerate(["GFI","GCF","EYF"]):
+            if f not in fund_outputs: continue
+            metrics, _, _ = fund_outputs[f]
+            with cols[idx]:
+                title_with_help(f"{f} – Expected Return", "Annualised carry + 1‑year roll‑down + macro drift (%).")
+                st.plotly_chart(kpi_number(metrics.get("ExpRet_pct", 0.0), kind="pp"),
+                                use_container_width=True, config=plotly_default_config, key=f"cmp_{f}_er")
+                # VaR KPI stays (informational)...
+                title_with_help(f"{f} – VaR99 1M", "Monthly 99% Value at Risk (loss).")
+                st.plotly_chart(kpi_number(metrics.get("VaR99_1M", 0.0), kind="pct"),
+                                use_container_width=True, config=plotly_default_config, key=f"cmp_{f}_var")
+
+                # ...but cap status is evaluated on CVaR
+                title_with_help(f"{f} – CVaR99 1M", "Average loss in the worst 1% of scenarios (cap applies to this).")
+                st.plotly_chart(kpi_number(metrics.get("CVaR99_1M", 0.0), kind="pct"),
+                                use_container_width=True, config=plotly_default_config, key=f"cmp_{f}_cvar")
+
+                fdef = fund_ud.get(f, {}).copy()
+                var_band = fdef.get("var_band", (0.0, VAR99_CAP[f]*100.0))
+                cvar_cap_eff = var_band[1] / 100.0
+                min_var_eff = var_band[0] / 100.0
+
+                status = "within cap" if metrics.get("CVaR99_1M", 0.0) <= cvar_cap_eff else "over cap"
+                st.caption(f"CVaR cap {cvar_cap_eff*100:.2f}% — {status}")
+                if min_var_eff > 0:
+                    st.caption(f"VaR floor {min_var_eff*100:.2f}% (VaR KPI is informational; cap applies to CVaR).")
+
+        # Chart only (table removed as requested)
+        title_with_help("Segment allocation (weights)", "Weights per segment for each fund (from saved defaults).")
+        alloc_df = pd.DataFrame(index=df["Name"])
+        for f in ["GFI","GCF","EYF"]:
+            if f in fund_outputs:
+                w = fund_outputs[f][0].get("weights", [])
+                if len(w) == len(df): alloc_df[f] = w
+        if not alloc_df.empty:
+            alloc_df = alloc_df.fillna(0.0)
+            max_w = alloc_df.max(axis=1); mask = max_w >= float(min_weight_display)
+            alloc_df_plot = alloc_df.loc[mask].copy()
+            fig_alloc = go.Figure()
+            for col in alloc_df_plot.columns:
+                fig_alloc.add_bar(name=col, x=alloc_df_plot.index, y=alloc_df_plot[col].values, marker_color=FUND_COLOR.get(col))
+            fig_alloc.update_layout(barmode="group", height=380, margin=dict(l=10, r=10, t=40, b=80), xaxis_title="Segment", yaxis_title="Weight")
+            st.plotly_chart(fig_alloc, use_container_width=True, key="compare_funds_allocation")
+    else:
+        st.info("No funds optimized yet. Set fund defaults in **Fund Detail** to populate this section.")
 
 spacer(1)
 
@@ -1066,13 +1422,21 @@ with tab_fund:
         OBJECTIVE_CHOICES = ["Max Excess Return / CVaR","Risk-adjusted Return (λ·CVaR)","Min VaR for Target Return Percentile","Max Return"]
         objective = st.selectbox("Objective", OBJECTIVE_CHOICES, index=OBJECTIVE_CHOICES.index(_get_fund_default(fund, "objective", "Max Excess Return / CVaR")), key="fund_objective")
         var_default_cap = float(VAR99_CAP[fund] * 100.0)
-        var_band = st.slider(f"{fund} VaR99 1M band (%)", 0.0, 15.0, value=_get_fund_default(fund, "var_band", (0.0, var_default_cap)), step=0.1, key="var99_band")
+        var_band = st.slider(
+            f"{fund} risk band: VaR99 floor (left) & CVaR99 cap (right) (%)",
+            0.0, 30.0,
+            value=_get_fund_default(fund, "var_band", (0.0, var_default_cap)),
+            step=0.1,
+            key="var99_band"
+        )
         min_var_pct = float(var_band[0]); var_cap = float(var_band[1]) / 100.0
         roll_incl_pct = st.slider("Include roll‑down return (%)", 0, 100, value=_get_fund_default(fund, "roll_incl_pct", 100), step=5, key="roll_incl_pct")
         target_ret_pctile = st.slider("Target Return Percentile", 1, 100, value=_get_fund_default(fund, "target_ret_pctile", 60), step=1, key="target_ret_pctile")
 
         # Renamed block
         st.write("Risk Corridors (min–max):")
+        st.caption("Non-IG = HY ratings ∪ EM hard-currency ∪ Bank Capital (AT1/T2). "
+                   "HY spread shocks apply to HY ratings, AT1 and EM sleeves; IG shocks apply otherwise.")
         fc = FUND_CONSTRAINTS[fund]
         cap_nonig_rng = st.slider("Non‑IG range", 0.0, 1.0, value=_get_fund_default(fund, "cap_nonig_rng", (0.0, float(fc.get('max_non_ig',1.0)))), step=0.01, key="cap_non_ig", help="Includes HY ratings, EM hard‑currency, and Bank Capital (AT1/T2).")
         cap_em_rng    = st.slider("EM range",      0.0, 1.0, value=_get_fund_default(fund, "cap_em_rng",    (0.0, float(fc.get('max_em',1.0)))), step=0.01, key="cap_em", help="EM hard‑currency sleeve only.")
@@ -1112,9 +1476,10 @@ with tab_fund:
 
     with c1:
         # Build μ with roll inclusion + macro drift
+        roll_values = df["Roll_Down_bps_1Y"].values if "Roll_Down_bps_1Y" in df.columns else np.zeros(len(df))
         mu_fund_percent = (
             df["Yield_Hedged_Pct"].values
-            + df["Roll_Down_bps_1Y"].values * (roll_incl_pct/100.0)
+            + roll_values * (roll_incl_pct/100.0)
             + macro_add_pct_vec                # << macro overlay
         )
         mu_fund = mu_fund_percent / 100.0
@@ -1127,7 +1492,7 @@ with tab_fund:
             "fund_caps": {"max_non_ig": float(cap_nonig_rng[1]), "max_em": float(cap_em_rng[1]), "max_hybrid": float(cap_hyb_rng[1]), "max_cash": float(cap_cash_rng[1]), "max_at1": float(cap_at1_rng[1])},
             "min_non_ig": float(cap_nonig_rng[0]), "min_em": float(cap_em_rng[0]), "min_hybrid": float(cap_hyb_rng[0]), "min_cash": float(cap_cash_rng[0]), "min_at1": float(cap_at1_rng[0]),
             "turnover_penalty": penalty_bps, "max_turnover": max_turn, "objective": objective,
-            "cvar_cap": ((var_cap if var_cap is not None else VAR99_CAP[fund]) * 1.15), "min_var": float(min_var_pct/100.0), "cvar_alpha": 0.99,
+            "cvar_cap": (var_cap if var_cap is not None else VAR99_CAP[fund]), "min_var": float(min_var_pct/100.0), "cvar_alpha": 0.99,
             "sharpe_lambda": float(sharpe_lambda)
         }
 
@@ -1155,6 +1520,20 @@ with tab_fund:
         if w is None:
             st.error(f"Optimisation failed: {metrics.get('status','')} – {metrics.get('message','')}"); st.stop()
 
+        # --- Turnover status & diagnostics ---
+        turn_active = prev_w_vec is not None and float(np.sum(prev_w_vec)) > 1e-8
+        realized_turn = float(np.sum(np.abs((prev_w_vec if turn_active else np.zeros_like(w)) - w)))
+        turn_cap = float(params_fd.get("max_turnover", 1.0)) if turn_active else 1.0
+        if turn_active:
+            st.info(f"Turnover active. Realised L1 turnover = {realized_turn:.2%} (cap {turn_cap:.2%}).")
+        else:
+            st.caption("Turnover inactive (no previous weights loaded): penalty=0, max_turn=100%.")
+
+        # Portfolio-level roll-down contribution (shown for transparency)
+        roll_used = (roll_incl_pct / 100.0)
+        port_roll_add_pct = float((df["Roll_Down_bps_1Y"].values if "Roll_Down_bps_1Y" in df.columns else np.zeros(len(df))) @ w) * roll_used
+        st.caption(f"Roll-down inclusion = {roll_incl_pct:.0f}% | Portfolio roll-down add = {port_roll_add_pct:.2f}%")
+
         port_pnl = pnl_matrix_assets @ w
         cols = st.columns(4)
         with cols[0]:
@@ -1176,8 +1555,9 @@ with tab_fund:
             if _diag.get("auto_relaxed"):
                 st.warning(f"Requested return floor was infeasible. Used percentile = {_diag.get('relaxed_to_percentile')} instead.")
 
-        st.caption(f"VaR99 1M: {metrics['VaR99_1M']*100:.2f}% (cap {var_cap*100:.2f}%)")
-        if min_var_pct > 0: st.caption(f"Risk band: VaR99 1M ≥ {min_var_pct:.2f}%")
+        st.caption(f"CVaR99 1M: {metrics['CVaR99_1M']*100:.2f}% (cap {var_cap*100:.2f}%)")
+        if min_var_pct > 0:
+            st.caption(f"VaR99 1M floor: ≥ {min_var_pct:.2f}% (VaR KPI shown separately).")
 
         # Permanent diagnostic table (change in weights)
         st.markdown("### 🧾 Diagnostic: Change in weights since last run")
@@ -1213,7 +1593,7 @@ with tab_fund:
             "Weight": w,
             "ER_Contribution_pct": w * (mu_fund * 100.0),
             "Yield_pct": df["Yield_Hedged_Pct"].values,
-            "RollDown_pct": df["Roll_Down_bps_1Y"].values,
+            "RollDown_pct": df["Roll_Down_bps_1Y"].values if "Roll_Down_bps_1Y" in df.columns else np.zeros(len(df)),
             "OAD_Years": df["OAD_Years"].values,
             "OASD_Years": df["OASD_Years"].values
         }).sort_values("Weight", ascending=False)
