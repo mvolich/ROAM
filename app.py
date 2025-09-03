@@ -92,6 +92,14 @@ def inject_brand_css():
         color: #000;
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
+
+      /* --- Fix expander header icon/text leakage --- */
+      .st-expanderHeader [data-testid="stExpanderToggleIcon"] {
+        display: none !important;       /* hide the raw 'keyboard_arrow_right' text/icon */
+      }
+      .st-expanderHeader {
+        align-items: center !important; /* keep label vertically centered */
+      }
     </style>
     """, unsafe_allow_html=True)
 
@@ -1105,6 +1113,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 spacer(1)
 
+def _init_state_default(key: str, default: str):
+    """Set a session_state default once; do not overwrite on reruns."""
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # Sidebar
 with st.sidebar:
@@ -1184,17 +1196,23 @@ with st.sidebar:
         except Exception:
             return float(default_abs_float)
 
+    # Initialise defaults ONCE (no value= on widgets; let Streamlit use session_state)
+    _init_state_default("rate_2y_input",  f"-{abs(float(st.session_state.get('rate_2y',  DEFAULT_RATES['2y']))):.1f}")
+    _init_state_default("rate_5y_input",  f"-{abs(float(st.session_state.get('rate_5y',  DEFAULT_RATES['5y']))):.1f}")
+    _init_state_default("rate_10y_input", f"-{abs(float(st.session_state.get('rate_10y', DEFAULT_RATES['10y']))):.1f}")
+    _init_state_default("rate_30y_input", f"-{abs(float(st.session_state.get('rate_30y', DEFAULT_RATES['30y']))):.1f}")
+
     with c1:
-        rate_2y_input  = st.text_input("2y", value=st.session_state.get("rate_2y_input", f"-{abs(float(st.session_state.get('rate_2y', DEFAULT_RATES['2y']))):.1f}"), key="rate_2y_input")
+        rate_2y_input  = st.text_input("2y", key="rate_2y_input")
         rate_2y_clean  = _clean_signed_number(rate_2y_input, st.session_state.get("rate_2y", DEFAULT_RATES["2y"]))
     with c2:
-        rate_5y_input  = st.text_input("5y", value=st.session_state.get("rate_5y_input", f"-{abs(float(st.session_state.get('rate_5y', DEFAULT_RATES['5y']))):.1f}"), key="rate_5y_input")
+        rate_5y_input  = st.text_input("5y", key="rate_5y_input")
         rate_5y_clean  = _clean_signed_number(rate_5y_input, st.session_state.get("rate_5y", DEFAULT_RATES["5y"]))
     with c3:
-        rate_10y_input = st.text_input("10y", value=st.session_state.get("rate_10y_input", f"-{abs(float(st.session_state.get('rate_10y', DEFAULT_RATES['10y']))):.1f}"), key="rate_10y_input")
+        rate_10y_input = st.text_input("10y", key="rate_10y_input")
         rate_10y_clean = _clean_signed_number(rate_10y_input, st.session_state.get("rate_10y", DEFAULT_RATES["10y"]))
     with c4:
-        rate_30y_input = st.text_input("30y", value=st.session_state.get("rate_30y_input", f"-{abs(float(st.session_state.get('rate_30y', DEFAULT_RATES['30y']))):.1f}"), key="rate_30y_input")
+        rate_30y_input = st.text_input("30y", key="rate_30y_input")
         rate_30y_clean = _clean_signed_number(rate_30y_input, st.session_state.get("rate_30y", DEFAULT_RATES["30y"]))
 
     RATES_BP99["2y"]=float(rate_2y_clean); RATES_BP99["5y"]=float(rate_5y_clean)
@@ -1205,17 +1223,24 @@ with st.sidebar:
     st.caption("TIGHTEN in benign (negative), WIDEN in moderate/severe (positive).")
     c1,c2,c3,c4 = st.columns(4)
     default_sign = "-" if selected_preset == "Benign" else "+"
+
+    # Initialise once; widgets will read from session_state
+    _init_state_default("spr_IG_input",  f"{default_sign}{abs(float(st.session_state.get('spr_IG',  DEFAULT_SPREAD['IG']))):.1f}")
+    _init_state_default("spr_HY_input",  f"{default_sign}{abs(float(st.session_state.get('spr_HY',  DEFAULT_SPREAD['HY']))):.1f}")
+    _init_state_default("spr_AT1_input", f"{default_sign}{abs(float(st.session_state.get('spr_AT1', DEFAULT_SPREAD['AT1']))):.1f}")
+    _init_state_default("spr_EM_input",  f"{default_sign}{abs(float(st.session_state.get('spr_EM',  DEFAULT_SPREAD['EM']))):.1f}")
+
     with c1:
-        spr_IG_input  = st.text_input("IG",  value=st.session_state.get("spr_IG_input",  f"{default_sign}{abs(float(st.session_state.get('spr_IG',  DEFAULT_SPREAD['IG']))):.1f}"),  key="spr_IG_input")
+        spr_IG_input  = st.text_input("IG",  key="spr_IG_input")
         spr_IG_clean  = _clean_signed_number(spr_IG_input,  st.session_state.get("spr_IG",  DEFAULT_SPREAD["IG"]))
     with c2:
-        spr_HY_input  = st.text_input("HY",  value=st.session_state.get("spr_HY_input",  f"{default_sign}{abs(float(st.session_state.get('spr_HY',  DEFAULT_SPREAD['HY']))):.1f}"),  key="spr_HY_input")
+        spr_HY_input  = st.text_input("HY",  key="spr_HY_input")
         spr_HY_clean  = _clean_signed_number(spr_HY_input,  st.session_state.get("spr_HY",  DEFAULT_SPREAD["HY"]))
     with c3:
-        spr_AT1_input = st.text_input("AT1", value=st.session_state.get("spr_AT1_input", f"{default_sign}{abs(float(st.session_state.get('spr_AT1', DEFAULT_SPREAD['AT1']))):.1f}"), key="spr_AT1_input")
+        spr_AT1_input = st.text_input("AT1", key="spr_AT1_input")
         spr_AT1_clean = _clean_signed_number(spr_AT1_input, st.session_state.get("spr_AT1", DEFAULT_SPREAD["AT1"]))
     with c4:
-        spr_EM_input  = st.text_input("EM",  value=st.session_state.get("spr_EM_input",  f"{default_sign}{abs(float(st.session_state.get('spr_EM',  DEFAULT_SPREAD['EM']))):.1f}"),  key="spr_EM_input")
+        spr_EM_input  = st.text_input("EM",  key="spr_EM_input")
         spr_EM_clean  = _clean_signed_number(spr_EM_input,  st.session_state.get("spr_EM",  DEFAULT_SPREAD["EM"]))
 
     SPREAD_BP99["IG"]=float(spr_IG_clean); SPREAD_BP99["HY"]=float(spr_HY_clean)
