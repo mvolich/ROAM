@@ -96,44 +96,6 @@ def inject_brand_css():
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
-      /* ----- Sidebar: kill horizontal scroll & prevent overflow ----- */
-      [data-testid="stSidebar"] {
-        overflow-x: hidden !important;   /* remove horizontal scrollbar */
-      }
-      [data-testid="stSidebar"] * {
-        max-width: 100% !important;      /* clamp child widths */
-        box-sizing: border-box !important;
-      }
-
-      /* Ensure any Material icon ligatures in the sidebar render as glyphs */
-      @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
-      [data-testid="stSidebar"] .material-icons,
-      [data-testid="stSidebar"] [class^="material-icons"],
-      [data-testid="stSidebar"] [class*=" material-icons"] {
-        font-family: 'Material Icons' !important;
-        -webkit-font-feature-settings: 'liga';
-                font-feature-settings: 'liga';
-        -webkit-font-smoothing: antialiased;
-        font-style: normal; font-weight: normal;
-      }
-
-      /* Coerce common sidebar toggle nodes to icons, not raw text (Cloud quirk) */
-      [data-testid="stSidebar"] [aria-label*="keyboard_"],
-      [data-testid="stSidebar"] [title*="keyboard_"] {
-        font-family: 'Material Icons' !important;
-        font-size: 18px !important;
-        line-height: 1 !important;
-        color: #68707a !important;
-      }
-
-      /* Absolute fallback: if Cloud still renders a free-floating ligature string,
-         hide any naked text node that escapes layout in the sidebar header area. */
-      [data-testid="stSidebar"] span, 
-      [data-testid="stSidebar"] div {
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
 
     """, unsafe_allow_html=True)
 
