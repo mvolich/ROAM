@@ -19,7 +19,7 @@ import plotly.io as pio
 import streamlit as st
 
 import time
-APP_BUILD = f"macro-expret-fix-2025-09-02-cloud-fix-{int(time.time())}"
+APP_BUILD = f"macro-expret-fix-2025-09-02-cloud-fix-2-{int(time.time())}"
 
 # Silence DPP warnings after making problems DPP-compliant
 try:
@@ -57,7 +57,9 @@ def perf_step(name, **meta):
 def inject_brand_css():
     st.markdown("""
     <style>
+      /* Fonts */
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+      @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
       :root{ --rb-blue:#001E4F; --rb-mblue:#2C5697; --rb-lblue:#7BA4DB; --rb-grey:#D8D7DF; --rb-orange:#CF4520; }
       html, body, .stApp, [class*="css"] { background-color:#f8f9fa; font-family:Inter, "Segoe UI", Roboto, Arial, sans-serif !important; color:#0b0c0c; }
       .stTabs [data-baseweb="tab-list"]{ display:flex !important; width:100% !important; gap:12px; border-bottom:none; }
@@ -94,55 +96,24 @@ def inject_brand_css():
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
-      /* --- Simple fix for Streamlit Cloud expander issues --- */
-      
-      /* Hide the first child of expander headers (usually contains the problematic text) */
+      /* ---- Streamlit Cloud expander fix ----
+         Cloud sometimes renders the toggle as literal text: "keyboard_arrow_right" / "keyboard_arrow_down".
+         We convert that first-child node to real Material Icon glyphs via ligatures. */
+      [data-testid="stExpander"] .st-expanderHeader {
+        display:flex !important; align-items:center !important; gap:6px;
+        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+        min-height:40px !important;
+      }
+      /* Turn the first child into a Material Icons ligature so 'keyboard_arrow_*' becomes the arrow glyph */
       [data-testid="stExpander"] .st-expanderHeader > *:first-child {
-        font-size: 0 !important;
-        width: 0 !important;
-        height: 0 !important;
-        opacity: 0 !important;
-        overflow: hidden !important;
-        position: absolute !important;
-        left: -9999px !important;
-      }
-
-      /* Clean expander header layout */
-      [data-testid="stExpander"] .st-expanderHeader {
-        display: flex !important;
-        align-items: center !important;
-        padding: 8px 12px !important;
-        position: relative !important;
-        min-height: 40px !important;
-      }
-
-      /* Add simple CSS arrow that works everywhere */
-      [data-testid="stExpander"] .st-expanderHeader::before {
-        content: "▶" !important;
-        font-size: 12px !important;
-        color: #666 !important;
-        margin-right: 8px !important;
-        display: inline-block !important;
-        transition: transform 0.15s ease !important;
-        font-family: Arial, sans-serif !important;
-      }
-
-      /* Rotate when expanded - multiple selectors for compatibility */
-      [data-testid="stExpander"][open] .st-expanderHeader::before,
-      [data-testid="stExpander"][aria-expanded="true"] .st-expanderHeader::before,
-      [data-testid="stExpander"].st-expanded .st-expanderHeader::before {
-        transform: rotate(90deg) !important;
-      }
-
-      /* Force clean text rendering */
-      [data-testid="stExpander"] .st-expanderHeader {
-        font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif !important;
-        font-size: 16px !important;
-        font-weight: 600 !important;
-        color: var(--rb-blue, #001E4F) !important;
-        text-overflow: ellipsis !important;
-        overflow: hidden !important;
-        white-space: nowrap !important;
+        font-family: 'Material Icons' !important;
+        -webkit-font-feature-settings: 'liga';
+                font-feature-settings: 'liga';
+        -webkit-font-smoothing: antialiased;
+        font-style: normal; font-weight: normal; text-transform: none; letter-spacing: normal;
+        font-size: 20px; line-height: 1; color: #666; display:inline-block;
+        width:auto !important; height:auto !important; opacity:1 !important; position:static !important;
+        margin-right: 4px;
       }
     """, unsafe_allow_html=True)
 
