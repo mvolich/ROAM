@@ -100,6 +100,13 @@ def inject_brand_css():
       .st-expanderHeader {
         align-items: center !important; /* keep label vertically centered */
       }
+
+      /* Remove expander toggle icon (keyboard_arrow_right) completely */
+      [data-testid="stExpander"] .st-expanderHeader [data-testid="stExpanderToggleIcon"],
+      [data-testid="stExpander"] .st-expanderHeader svg,
+      [data-testid="stExpander"] .st-expanderHeader .material-icons {
+        display: none !important;
+      }
     </style>
     """, unsafe_allow_html=True)
 
