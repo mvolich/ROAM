@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-APP_BUILD = "macro-expret-fix-2025-09-02-icons"
+APP_BUILD = "macro-expret-fix-2025-09-02-arrow-fix"
 
 # Silence DPP warnings after making problems DPP-compliant
 try:
@@ -95,28 +95,46 @@ def inject_brand_css():
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
-      /* --- Expander header: keep Streamlit defaults; prevent overlap --- */
-      [data-testid="stExpander"] .st-expanderHeader .material-icons,
-      [data-testid="stExpander"] .st-expanderHeader [class^="material-icons"] {
-        font-family: 'Material Icons' !important;
-        font-style: normal;
-        font-weight: normal;
-        font-size: 20px;
-        line-height: 1;
-        letter-spacing: normal;
-        text-transform: none;
-        display: inline-block;
-        white-space: nowrap;
-        direction: ltr;
-        -webkit-font-feature-settings: 'liga';
-        -webkit-font-smoothing: antialiased;
-      }
-
-      /* Space between arrow icon and label */
+      /* --- Expander header: hide problematic text, ensure clean layout --- */
       [data-testid="stExpander"] .st-expanderHeader {
         display: flex !important;
         align-items: center !important;
         gap: 6px;
+        position: relative;
+      }
+
+      /* Hide keyboard_arrow text that appears when Material Icons don't load */
+      [data-testid="stExpander"] .st-expanderHeader *:first-child {
+        font-size: 0 !important;
+        color: transparent !important;
+        width: 20px !important;
+        height: 20px !important;
+        overflow: hidden !important;
+        position: relative;
+      }
+
+      /* Replace with CSS arrow using ::before pseudo-element */
+      [data-testid="stExpander"] .st-expanderHeader *:first-child::before {
+        content: "▶" !important;
+        font-size: 16px !important;
+        color: #666 !important;
+        position: absolute !important;
+        top: 50% !important;
+        left: 50% !important;
+        transform: translate(-50%, -50%) !important;
+        transition: transform 0.2s ease !important;
+      }
+
+      /* Rotate arrow when expanded */
+      [data-testid="stExpander"][aria-expanded="true"] .st-expanderHeader *:first-child::before {
+        transform: translate(-50%, -50%) rotate(90deg) !important;
+      }
+
+      /* Ensure label text is visible and properly positioned */
+      [data-testid="stExpander"] .st-expanderHeader > *:not(:first-child) {
+        flex: 1 !important;
+        font-size: inherit !important;
+        color: inherit !important;
       }
     </style>
     """, unsafe_allow_html=True)
