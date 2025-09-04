@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-APP_BUILD = "macro-expret-fix-2025-09-02c"  # CSS cache bust
+APP_BUILD = "macro-expret-fix-2025-09-02-expanderfix"
 
 # Silence DPP warnings after making problems DPP-compliant
 try:
@@ -93,31 +93,14 @@ def inject_brand_css():
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
-      /* --- Fix expander header icon/text leakage --- */
-      .st-expanderHeader [data-testid="stExpanderToggleIcon"] {
-        display: none !important;       /* hide the raw 'keyboard_arrow_right' text/icon */
-      }
-      .st-expanderHeader {
-        align-items: center !important; /* keep label vertically centered */
-      }
-
-      /* Remove expander toggle icon (keyboard_arrow_right) completely */
-      [data-testid="stExpander"] .st-expanderHeader [data-testid="stExpanderToggleIcon"],
-      [data-testid="stExpander"] .st-expanderHeader svg,
-      [data-testid="stExpander"] .st-expanderHeader .material-icons {
-        display: none !important;
-      }
-
-      /* Remove any leading icon/text before the expander label to stop 'keyboard_arrow_*' overlap */
-      [data-testid="stExpander"] .st-expanderHeader > *:first-child {
-        display: none !important;
-      }
-      /* Keep the header tidy after removing the first child */
+      /* --- Expander header: keep Streamlit defaults; prevent overlap --- */
       [data-testid="stExpander"] .st-expanderHeader {
+        display: flex !important;
         align-items: center !important;
-        white-space: nowrap !important;
-        overflow: hidden !important;
-        text-overflow: ellipsis !important;
+        gap: 6px;                 /* space between icon and label */
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
     </style>
     """, unsafe_allow_html=True)
@@ -1340,10 +1323,10 @@ _cf_expander = st.expander("Compare Funds: positioning & risk (from defaults)", 
 with _cf_expander:
     st.caption("Each fund uses its stored per‑fund defaults (set in Fund Detail). If none saved, base defaults are used.")
 
-fund_outputs = {}
-ud = _user_defaults(); fund_ud = ud.get("funds", {})
-for _f, _d in fund_ud.items():
-    if _d.get("objective") == "Max Drawdown Proxy": _d["objective"] = "Min VaR for Target Return Percentile"
+    fund_outputs = {}
+    ud = _user_defaults(); fund_ud = ud.get("funds", {})
+    for _f, _d in fund_ud.items():
+        if _d.get("objective") == "Max Drawdown Proxy": _d["objective"] = "Min VaR for Target Return Percentile"
 
     def run_fund(fund: str, objective: str, var_cap_override=None, prev_w=None, mu_override=None, fb_override=None, fc_override=None, target_return_override=None, min_var_override=None):
         fb_local = fb_override or FACTOR_BUDGETS_DEFAULT
