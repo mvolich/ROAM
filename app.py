@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-APP_BUILD = "macro-expret-fix-2025-09-02-expanderfix"
+APP_BUILD = "macro-expret-fix-2025-09-02-icons"
 
 # Silence DPP warnings after making problems DPP-compliant
 try:
@@ -57,6 +57,8 @@ def inject_brand_css():
     st.markdown("""
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
+      /* Load Material Icons so expander arrows render correctly */
+      @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
       :root{ --rb-blue:#001E4F; --rb-mblue:#2C5697; --rb-lblue:#7BA4DB; --rb-grey:#D8D7DF; --rb-orange:#CF4520; }
       html, body, .stApp, [class*="css"] { background-color:#f8f9fa; font-family:Inter, "Segoe UI", Roboto, Arial, sans-serif !important; color:#0b0c0c; }
       .stTabs [data-baseweb="tab-list"]{ display:flex !important; width:100% !important; gap:12px; border-bottom:none; }
@@ -94,13 +96,27 @@ def inject_brand_css():
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
       /* --- Expander header: keep Streamlit defaults; prevent overlap --- */
+      [data-testid="stExpander"] .st-expanderHeader .material-icons,
+      [data-testid="stExpander"] .st-expanderHeader [class^="material-icons"] {
+        font-family: 'Material Icons' !important;
+        font-style: normal;
+        font-weight: normal;
+        font-size: 20px;
+        line-height: 1;
+        letter-spacing: normal;
+        text-transform: none;
+        display: inline-block;
+        white-space: nowrap;
+        direction: ltr;
+        -webkit-font-feature-settings: 'liga';
+        -webkit-font-smoothing: antialiased;
+      }
+
+      /* Space between arrow icon and label */
       [data-testid="stExpander"] .st-expanderHeader {
         display: flex !important;
         align-items: center !important;
-        gap: 6px;                 /* space between icon and label */
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        gap: 6px;
       }
     </style>
     """, unsafe_allow_html=True)
