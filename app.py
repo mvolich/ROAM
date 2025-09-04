@@ -18,7 +18,7 @@ import plotly.graph_objects as go
 import plotly.io as pio
 import streamlit as st
 
-APP_BUILD = "macro-expret-fix-2025-09-02b"  # bump to bust st.cache_data
+APP_BUILD = "macro-expret-fix-2025-09-02c"  # CSS cache bust
 
 # Silence DPP warnings after making problems DPP-compliant
 try:
@@ -106,6 +106,18 @@ def inject_brand_css():
       [data-testid="stExpander"] .st-expanderHeader svg,
       [data-testid="stExpander"] .st-expanderHeader .material-icons {
         display: none !important;
+      }
+
+      /* Remove any leading icon/text before the expander label to stop 'keyboard_arrow_*' overlap */
+      [data-testid="stExpander"] .st-expanderHeader > *:first-child {
+        display: none !important;
+      }
+      /* Keep the header tidy after removing the first child */
+      [data-testid="stExpander"] .st-expanderHeader {
+        align-items: center !important;
+        white-space: nowrap !important;
+        overflow: hidden !important;
+        text-overflow: ellipsis !important;
       }
     </style>
     """, unsafe_allow_html=True)
