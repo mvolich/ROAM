@@ -58,8 +58,6 @@ def inject_brand_css():
     st.markdown("""
     <style>
       @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap');
-      /* Load Material Icons so expander arrows render correctly */
-      @import url('https://fonts.googleapis.com/icon?family=Material+Icons');
       :root{ --rb-blue:#001E4F; --rb-mblue:#2C5697; --rb-lblue:#7BA4DB; --rb-grey:#D8D7DF; --rb-orange:#CF4520; }
       html, body, .stApp, [class*="css"] { background-color:#f8f9fa; font-family:Inter, "Segoe UI", Roboto, Arial, sans-serif !important; color:#0b0c0c; }
       .stTabs [data-baseweb="tab-list"]{ display:flex !important; width:100% !important; gap:12px; border-bottom:none; }
@@ -96,26 +94,17 @@ def inject_brand_css():
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
-      /* --- Aggressive expander fix for Streamlit Cloud --- */
+      /* --- Simple fix for Streamlit Cloud expander issues --- */
       
-      /* Hide ALL text content in expander headers that might be keyboard_arrow */
-      [data-testid="stExpander"] .st-expanderHeader,
-      [data-testid="stExpander"] .st-expanderHeader *,
-      [data-testid="stExpander"] .st-expanderHeader span,
-      [data-testid="stExpander"] .st-expanderHeader div {
-        font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif !important;
-      }
-
-      /* Target any element containing keyboard_arrow text */
-      [data-testid="stExpander"] .st-expanderHeader *[class*="material"],
-      [data-testid="stExpander"] .st-expanderHeader span:first-child,
-      [data-testid="stExpander"] .st-expanderHeader div:first-child {
-        display: none !important;
-        visibility: hidden !important;
+      /* Hide the first child of expander headers (usually contains the problematic text) */
+      [data-testid="stExpander"] .st-expanderHeader > *:first-child {
+        font-size: 0 !important;
         width: 0 !important;
         height: 0 !important;
-        font-size: 0 !important;
         opacity: 0 !important;
+        overflow: hidden !important;
+        position: absolute !important;
+        left: -9999px !important;
       }
 
       /* Clean expander header layout */
@@ -123,108 +112,38 @@ def inject_brand_css():
         display: flex !important;
         align-items: center !important;
         padding: 8px 12px !important;
-        cursor: pointer !important;
-        background: transparent !important;
-        border: none !important;
         position: relative !important;
+        min-height: 40px !important;
       }
 
-      /* Add our own arrow */
+      /* Add simple CSS arrow that works everywhere */
       [data-testid="stExpander"] .st-expanderHeader::before {
         content: "▶" !important;
-        font-size: 14px !important;
+        font-size: 12px !important;
         color: #666 !important;
         margin-right: 8px !important;
-        transition: transform 0.2s ease !important;
         display: inline-block !important;
-        width: 16px !important;
-        text-align: center !important;
+        transition: transform 0.15s ease !important;
+        font-family: Arial, sans-serif !important;
       }
 
-      /* Rotate arrow when expanded */
+      /* Rotate when expanded - multiple selectors for compatibility */
       [data-testid="stExpander"][open] .st-expanderHeader::before,
-      [data-testid="stExpander"].streamlit-expanderHeader-expanded .st-expanderHeader::before {
+      [data-testid="stExpander"][aria-expanded="true"] .st-expanderHeader::before,
+      [data-testid="stExpander"].st-expanded .st-expanderHeader::before {
         transform: rotate(90deg) !important;
       }
 
-      /* Ensure expander text is clean */
+      /* Force clean text rendering */
       [data-testid="stExpander"] .st-expanderHeader {
+        font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif !important;
         font-size: 16px !important;
         font-weight: 600 !important;
         color: var(--rb-blue, #001E4F) !important;
+        text-overflow: ellipsis !important;
+        overflow: hidden !important;
+        white-space: nowrap !important;
       }
-
-      /* Remove any lingering keyboard_arrow text */
-      [data-testid="stExpander"] .st-expanderHeader *:contains("keyboard_arrow"),
-      [data-testid="stExpander"] .st-expanderHeader *:contains("keyboard_arrow_right"),
-      [data-testid="stExpander"] .st-expanderHeader *:contains("keyboard_arrow_down") {
-        display: none !important;
-      }
-    </style>
-    
-    <script>
-      // Additional JavaScript fix for Streamlit Cloud
-      setTimeout(function() {
-        const expanders = document.querySelectorAll('[data-testid="stExpander"] .st-expanderHeader');
-        expanders.forEach(function(header) {
-          // Remove any text nodes containing keyboard_arrow
-          const walker = document.createTreeWalker(
-            header,
-            NodeFilter.SHOW_TEXT,
-            null,
-            false
-          );
-          
-          let node;
-          const nodesToRemove = [];
-          while (node = walker.nextNode()) {
-            if (node.textContent.includes('keyboard_arrow')) {
-              nodesToRemove.push(node);
-            }
-          }
-          
-          nodesToRemove.forEach(function(node) {
-            node.remove();
-          });
-        });
-      }, 100);
-      
-      // Re-run the fix when Streamlit updates the DOM
-      const observer = new MutationObserver(function(mutations) {
-        mutations.forEach(function(mutation) {
-          if (mutation.addedNodes.length > 0) {
-            setTimeout(function() {
-              const expanders = document.querySelectorAll('[data-testid="stExpander"] .st-expanderHeader');
-              expanders.forEach(function(header) {
-                const walker = document.createTreeWalker(
-                  header,
-                  NodeFilter.SHOW_TEXT,
-                  null,
-                  false
-                );
-                
-                let node;
-                const nodesToRemove = [];
-                while (node = walker.nextNode()) {
-                  if (node.textContent.includes('keyboard_arrow')) {
-                    nodesToRemove.push(node);
-                  }
-                }
-                
-                nodesToRemove.forEach(function(node) {
-                  node.remove();
-                });
-              });
-            }, 50);
-          }
-        });
-      });
-      
-      observer.observe(document.body, {
-        childList: true,
-        subtree: true
-      });
-    </script>
     """, unsafe_allow_html=True)
 
 def title_with_help(label: str, help_text: str):
