@@ -96,25 +96,6 @@ def inject_brand_css():
       }
       div[data-baseweb="select"] > div:hover { border-color: var(--rb-mblue); }
 
-      /* ---- Streamlit Cloud expander fix ----
-         Cloud sometimes renders the toggle as literal text: "keyboard_arrow_right" / "keyboard_arrow_down".
-         We convert that first-child node to real Material Icon glyphs via ligatures. */
-      [data-testid="stExpander"] .st-expanderHeader {
-        display:flex !important; align-items:center !important; gap:6px;
-        white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
-        min-height:40px !important;
-      }
-      /* Turn the first child into a Material Icons ligature so 'keyboard_arrow_*' becomes the arrow glyph */
-      [data-testid="stExpander"] .st-expanderHeader > *:first-child {
-        font-family: 'Material Icons' !important;
-        -webkit-font-feature-settings: 'liga';
-                font-feature-settings: 'liga';
-        -webkit-font-smoothing: antialiased;
-        font-style: normal; font-weight: normal; text-transform: none; letter-spacing: normal;
-        font-size: 20px; line-height: 1; color: #666; display:inline-block;
-        width:auto !important; height:auto !important; opacity:1 !important; position:static !important;
-        margin-right: 4px;
-      }
     """, unsafe_allow_html=True)
 
 def title_with_help(label: str, help_text: str):
@@ -1331,8 +1312,17 @@ with perf_step("expected_return_vector", assets=len(df)):
     mu_base = mu_base_percent / 100.0
 
 # ----------------------------- Compare Funds -----------------------------
-_cf_expander = st.expander("Compare Funds: positioning & risk (from defaults)", expanded=False)
-with _cf_expander:
+# Toggle replaces expander (persists via session_state)
+if "show_compare" not in st.session_state:
+    st.session_state["show_compare"] = False
+
+show_compare = st.toggle(
+    "Compare Funds: positioning & risk (from defaults)",
+    value=st.session_state["show_compare"],
+    key="show_compare"
+)
+
+if show_compare:
     st.caption("Each fund uses its stored per‑fund defaults (set in Fund Detail). If none saved, base defaults are used.")
 
     fund_outputs = {}
